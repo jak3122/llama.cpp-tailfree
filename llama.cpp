@@ -1456,7 +1456,8 @@ static llama_vocab::id llama_sample_top_p_top_k(
         int top_k,
         float top_p,
         float temp,
-        float repeat_penalty) {
+        float repeat_penalty,
+        float tail_free_z) {
     auto & rng = lctx.rng;
 
     const int n_logits = lctx.model.hparams.n_vocab;
@@ -1482,7 +1483,8 @@ static llama_vocab::id llama_sample_top_p_top_k(
     logits_id.reserve(n_logits);
 
     {
-        const float scale = 1.0f/temp;
+        // const float scale = 1.0f/temp;
+        const float scale = 1.0f;
         for (int i = 0; i < n_logits; ++i) {
             // repetition penalty from ctrl paper (https://arxiv.org/abs/1909.05858)
             // credit https://github.com/facebookresearch/llama/compare/main...shawwn:llama:main
@@ -1529,6 +1531,79 @@ static llama_vocab::id llama_sample_top_p_top_k(
             }
         }
     }
+
+    if (tail_free_z < 1.0) {
+        // do tail-free sampling
+
+        // calculate the first derivative of the probs
+        std::vector<float> dprobs;
+        dprobs.reserve(probs.size());
+        for (int i = 1; i < (int) probs.size(); i++) {
+            dprobs.push_back(probs[i] - probs[i - 1]);
+        }
+
+        // calculate the second derivative of the probs
+        std::vector<float> ddprobs;
+        ddprobs.reserve(dprobs.size());
+        for (int i = 1; i < (int) dprobs.size(); i++) {
+            ddprobs.push_back(dprobs[i] - dprobs[i - 1]);
+        }
+
+        // calculate the absolute values of the second derivatives
+        std::vector<float> abs_ddprobs;
+        abs_ddprobs.reserve(ddprobs.size());
+        for (int i = 0; i < (int) ddprobs.size(); i++) {
+            abs_ddprobs.push_back(fabsf(ddprobs[i]));
+        }
+
+        // normalize the second derivatives
+        sum = 0.0;
+        for (auto & p : abs_ddprobs) {
+            sum += p;
+        }
+        for (auto & p : abs_ddprobs) {
+            p /= sum;
+        }
+
+        // find the smallest subset of the second derivative magnitudes
+        // whose sum surpasses the threshold of tail_free_z
+        double cumsum = 0.0;
+        for (int i = 0; i < (int) abs_ddprobs.size(); i++) {
+            cumsum += abs_ddprobs[i];
+            if (cumsum >= tail_free_z) {
+                probs.resize(i + 1);
+                logits_id.resize(i + 1);
+                break;
+            }
+        }
+
+        // normalize the probs
+        sum = 0.0;
+        for (auto & p : probs) {
+            sum += p;
+        }
+        for (auto & p : probs) {
+            p /= sum;
+        }
+    }
+
+    // apply temp to probs
+    for (auto & p : probs) {
+        p = powf(p, 1.0f / temp);
+    }
+
+    // normalize the probs
+    sum = 0.0;
+    for (auto & p : probs) {
+        sum += p;
+    }
+    for (auto & p : probs) {
+        p /= sum;
+    }
+
+
+    // print size of probs
+    // printf("[%d]", (int) probs.size());
 
     //printf("\n");
     //for (int i = 0; i < (int) 10; i++) {
@@ -1866,7 +1941,8 @@ llama_token llama_sample_top_p_top_k(
                     int   top_k,
                   float   top_p,
                   float   temp,
-                  float   repeat_penalty) {
+                  float   repeat_penalty,
+                  float   tail_free_z) {
     const int64_t t_start_sample_us = ggml_time_us();
 
     llama_token result = 0;
@@ -1880,7 +1956,8 @@ llama_token llama_sample_top_p_top_k(
             top_k,
             top_p,
             temp,
-            repeat_penalty);
+            repeat_penalty,
+            tail_free_z);
 
     ctx->t_sample_us += ggml_time_us() - t_start_sample_us;
     ctx->n_sample++;
