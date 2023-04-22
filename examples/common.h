@@ -20,7 +20,7 @@ struct gpt_params {
     int32_t repeat_last_n = 64;   // last n tokens to penalize
     int32_t n_parts       = -1;   // amount of model parts (-1 = determine from model dimensions)
     int32_t n_ctx         = 512;  // context size
-    int32_t n_batch       = 8;    // batch size for prompt processing
+    int32_t n_batch       = 512;  // batch size for prompt processing (must be >=32 to use BLAS)
     int32_t n_keep        = 0;    // number of tokens to keep from initial prompt
 
     // sampling parameters
@@ -32,10 +32,11 @@ struct gpt_params {
 
     std::string model  = "models/lamma-7B/ggml-model.bin"; // model path
     std::string prompt = "";
-    std::string input_prefix = ""; // string to prefix user inputs with
-
-
+    std::string input_prefix = "";       // string to prefix user inputs with
     std::vector<std::string> antiprompt; // string upon seeing which more user input is prompted
+
+    std::string lora_adapter = "";  // lora adapter path
+    std::string lora_base = "";     // base model path for the lora adapter
 
     bool memory_f16        = true;  // use f16 instead of f32 for memory kv
     bool random_prompt     = false; // do not randomize prompt if none provided

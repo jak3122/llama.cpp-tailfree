@@ -21,6 +21,9 @@
         #if defined(_POSIX_MAPPED_FILES)
             #include <sys/mman.h>
         #endif
+        #if defined(_POSIX_MEMLOCK_RANGE)
+            #include <sys/resource.h>
+        #endif
     #endif
 #endif
 
@@ -168,7 +171,7 @@ struct llama_mmap {
 #ifdef _POSIX_MAPPED_FILES
     static constexpr bool SUPPORTED = true;
 
-    llama_mmap(struct llama_file * file) {
+    llama_mmap(struct llama_file * file, bool prefetch = true) {
         size = file->size;
         int fd = fileno(file->fp);
         int flags = MAP_SHARED;
@@ -180,10 +183,12 @@ struct llama_mmap {
             throw format("mmap failed: %s", strerror(errno));
         }
 
-        // Advise the kernel to preload the mapped memory
-        if (madvise(addr, file->size, MADV_WILLNEED)) {
-            fprintf(stderr, "warning: madvise(.., MADV_WILLNEED) failed: %s\n",
-                    strerror(errno));
+        if (prefetch) {
+            // Advise the kernel to preload the mapped memory
+            if (madvise(addr, file->size, MADV_WILLNEED)) {
+                fprintf(stderr, "warning: madvise(.., MADV_WILLNEED) failed: %s\n",
+                        strerror(errno));
+            }
         }
     }
 
@@ -193,14 +198,13 @@ struct llama_mmap {
 #elif defined(_WIN32)
     static constexpr bool SUPPORTED = true;
 
-    llama_mmap(struct llama_file * file) {
+    llama_mmap(struct llama_file * file, bool prefetch = true) {
         size = file->size;
 
         HANDLE hFile = (HANDLE) _get_osfhandle(_fileno(file->fp));
 
         HANDLE hMapping = CreateFileMappingA(hFile, NULL, PAGE_READONLY, 0, 0, NULL);
         DWORD error = GetLastError();
-        CloseHandle(hFile);
 
         if (hMapping == NULL) {
             throw format("CreateFileMappingA failed: %s", llama_format_win_err(error).c_str());
@@ -215,13 +219,15 @@ struct llama_mmap {
         }
 
         #if _WIN32_WINNT >= _WIN32_WINNT_WIN8
-        // Advise the kernel to preload the mapped memory
-        WIN32_MEMORY_RANGE_ENTRY range;
-        range.VirtualAddress = addr;
-        range.NumberOfBytes = (SIZE_T)size;
-        if (!PrefetchVirtualMemory(GetCurrentProcess(), 1, &range, 0)) {
-            fprintf(stderr, "warning: PrefetchVirtualMemory failed: %s\n",
-                    llama_format_win_err(GetLastError()).c_str());
+        if (prefetch) {
+            // Advise the kernel to preload the mapped memory
+            WIN32_MEMORY_RANGE_ENTRY range;
+            range.VirtualAddress = addr;
+            range.NumberOfBytes = (SIZE_T)size;
+            if (!PrefetchVirtualMemory(GetCurrentProcess(), 1, &range, 0)) {
+                fprintf(stderr, "warning: PrefetchVirtualMemory failed: %s\n",
+                        llama_format_win_err(GetLastError()).c_str());
+            }
         }
         #else
         #pragma message("warning: You are building for pre-Windows 8; prefetch not supported")
@@ -300,8 +306,18 @@ struct llama_mlock {
         if (!mlock(addr, size)) {
             return true;
         } else {
-            fprintf(stderr, "warning: failed to mlock %zu-byte buffer (after previously locking %zu bytes): %s\n" MLOCK_SUGGESTION,
-                    size, this->size, std::strerror(errno));
+            char* errmsg = std::strerror(errno);
+            bool suggest = (errno == ENOMEM);
+
+            // Check if the resource limit is fine after all
+            struct rlimit lock_limit;
+            if (suggest && getrlimit(RLIMIT_MEMLOCK, &lock_limit))
+                suggest = false;
+            if (suggest && (lock_limit.rlim_max > lock_limit.rlim_cur + size))
+                suggest = false;
+
+            fprintf(stderr, "warning: failed to mlock %zu-byte buffer (after previously locking %zu bytes): %s\n%s",
+                    size, this->size, errmsg, suggest ? MLOCK_SUGGESTION : "");
             return false;
         }
     }
